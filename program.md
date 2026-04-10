@@ -1,114 +1,176 @@
 # autoresearch
 
-This is an experiment to have the LLM do its own research.
+This repository now serves a different task: turn a research paper plus an optional GitHub repository/URL into a visual, clickable curation folder that explains how the work functions.
 
-## Setup
+The output should feel like a guided map of the paper. A reader should be able to start from a top-level pipeline view, click into any block, and then descend into progressively more detailed “inception-like” subgraphs, with short Markdown explanations and relevant code snippets beside each step.
 
-To set up a new experiment, work with the user to:
+## Goal
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `autoresearch/<tag>` must not already exist — this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, training loop.
-4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+Given:
 
-Once you get confirmation, kick off the experimentation.
+1. A research paper, and
+2. Optionally a GitHub repo or URL that implements or relates to the paper,
 
-## Experimentation
+build a new folder for that paper that visually explains:
 
-Each experiment runs on a single GPU. The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `uv run train.py`.
+1. The paper’s overall pipeline.
+2. Each major stage of the method.
+3. The dependencies between stages.
+4. The implementation details in the code, when source is available.
+5. The most important snippets that support each explanation.
 
-**What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc.
+The result should be easy to browse in Obsidian, but also readable as plain Markdown and Mermaid files without any special tooling.
 
-**What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
-- Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+## Operating principles
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+Use the paper as the source of truth. Use the repo or URL as supporting evidence when it exists. Do not invent mechanisms, data paths, or implementation details that are not grounded in the supplied sources.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+Prefer clarity over decoration. The visuals should make the structure of the work obvious, not merely attractive.
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+Prefer a shallow top-level map with deeper drill-down pages underneath. The top canvas should show the entire method at a glance; each node should then open a more detailed page or subgraph for that step.
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+Keep the artifact set deterministic so a reader can predict where to find each explanation, diagram, and snippet.
 
-## Output format
+## Required input handling
 
-Once the script finishes it prints a summary like this:
+When the user gives a paper, do the following:
 
-```
----
-val_bpb:          0.997900
-training_seconds: 300.1
-total_seconds:    325.9
-peak_vram_mb:     45060.2
-mfu_percent:      39.80
-total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
-depth:            8
-```
+1. Identify the paper title, core claim, and main method blocks.
+2. If a GitHub repo or URL is available, inspect it as the implementation reference.
+3. Extract a compact outline of the method before writing any visual artifacts.
+4. Decide the paper slug and use it consistently for the generated folder name and all nested files.
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+If the paper or repo is ambiguous, proceed with the best supported interpretation and note the uncertainty in the overview page rather than blocking.
 
-```
-grep "^val_bpb:" run.log
-```
+## Output contract
 
-## Logging results
+Create a new folder for each paper, named from a short slug. The folder should contain at least the following:
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
-
-The TSV has a header row and 5 columns:
-
-```
-commit	val_bpb	memory_gb	status	description
+```text
+<paper-slug>/
+   README.md
+   overview.md
+   canvas.canvas
+   pipeline.mmd
+   sources.md
+   steps/
+      01-<stage>.md
+      02-<stage>.md
+   snippets/
+      01-<stage>-<snippet>.md
+      02-<stage>-<snippet>.md
+   diagrams/
+      01-<stage>.mmd
+      02-<stage>.mmd
 ```
 
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+Use more files if needed, but keep the structure predictable:
 
-Example:
+1. `README.md` is the human entry point.
+2. `overview.md` explains the paper in prose and links to everything else.
+3. `canvas.canvas` is the top-level Obsidian canvas that acts as the primary navigation surface.
+4. `pipeline.mmd` is the high-level Mermaid map of the whole method.
+5. `sources.md` records the paper citation, repo URL, and any other source anchors.
+6. `steps/` holds one Markdown page per major stage.
+7. `snippets/` holds short code or pseudocode excerpts tied to a single stage.
+8. `diagrams/` holds stage-level Mermaid diagrams and subgraphs.
 
-```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
-b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
-c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
-```
+## Visual hierarchy
 
-## The experiment loop
+The structure should be hierarchical:
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+1. Top level: a single pipeline view that names the major blocks of the method.
+2. Middle level: one page and one Mermaid diagram per block, each describing how that block works.
+3. Deep level: nested subgraphs or child pages for the important internal operations inside a block.
+4. Evidence level: code snippets, equations, or paper passages that justify the explanation.
 
-LOOP FOREVER:
+Every block on the top canvas should have a clear click target to one of the step pages. Each step page should then expose links to its Mermaid subgraph, deeper breakdown pages, and snippet files.
 
-1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
-9. If val_bpb is equal or worse, you git reset back to where you started
+If a step contains multiple internal operations, represent them as an inner graph rather than flattening them into a paragraph. Use the Mermaid diagram for structure and the Markdown page for interpretation.
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
+## Canvas rules
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+The canvas is the main navigation layer, not the place for long prose.
 
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
+Use the canvas to show:
 
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+1. The full pipeline.
+2. The main blocks of the method.
+3. The most important transitions between blocks.
+4. Clickable links to the step pages.
 
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+Each node should point to a file that explains that node in more depth. Avoid duplicate content on the canvas itself.
+
+## Markdown page rules
+
+Each step page should answer four questions:
+
+1. What is this step doing?
+2. Why does it exist in the overall method?
+3. What are the inputs and outputs?
+4. What code or paper text supports this interpretation?
+
+Keep each page short and focused. If a page is getting large, split it into a parent step page and a child page for the sub-operation.
+
+At the top of each step page, include links back to the overview and to any sibling stages so a reader can navigate laterally.
+
+## Mermaid rules
+
+Use Mermaid for the method’s shape and control flow.
+
+The top `pipeline.mmd` should be simple and readable at a glance. The stage-level diagrams can be more detailed and may use nested subgraphs where appropriate.
+
+Prefer Mermaid diagrams that explain:
+
+1. Data flow.
+2. Control flow.
+3. Stage ordering.
+4. Branches, merges, and repeated loops.
+
+Do not use Mermaid for dense prose or for unsupported detail.
+
+## Snippet rules
+
+Snippets are sidecar evidence, not a code dump.
+
+Each snippet file should:
+
+1. Be short.
+2. Tie to one step only.
+3. Include a brief note about why it matters.
+4. Point back to the step page that references it.
+
+If the repo is available, prefer small source excerpts, function signatures, or pseudocode mirrors of the implementation. If source is not available, use paper equations or algorithmic pseudocode instead.
+
+## Sources and grounding
+
+Record the paper citation and repo URL in `sources.md`.
+
+When describing a stage, ground it in one of three ways:
+
+1. Paper text or figure.
+2. Repository code.
+3. Reasonable synthesis that is explicitly labeled as inference.
+
+Do not present inference as fact. If something is inferred, say so clearly in the page text.
+
+## Completion criteria
+
+A paper run is complete when the folder contains:
+
+1. A top-level overview.
+2. A navigable canvas.
+3. A Mermaid pipeline map.
+4. One page per major stage.
+5. One or more nested subgraphs for the deeper operations that matter.
+6. Short code or pseudocode snippets that support the explanations.
+
+The final folder should let a reader move from the broad method to the implementation details without losing context.
+
+## Writing style
+
+Write for a technically literate reader who wants structure first and detail second.
+
+Use concise prose, direct labels, and stable file names. Avoid hype, avoid speculation, and avoid dense wall-of-text explanations when a diagram would communicate the same idea more clearly.
+
+If two representations say the same thing, keep the simpler one.
