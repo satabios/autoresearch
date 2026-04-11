@@ -1,24 +1,30 @@
-# autoresearch
+# Fastron
 
-This repository is now a minimal workspace for an agentic research-paper visualizer.
+An optimized neural-network graph visualizer built on [Netron](https://github.com/lutzroeder/netron).
 
-The project is driven by one file: [program.md](program.md). It instructs an agent to take a research paper (plus optional GitHub repo/URL) and generate a structured, clickable curation folder using:
+Reference implementation: [satabios/fastron](https://github.com/satabios/fastron)
 
-1. Obsidian canvas (`.canvas`)
-2. Mermaid diagrams (`.mmd`)
-3. Markdown explanation pages
-4. Linked code snippet sidecars
+## What It Does
 
-## What This Repo Contains
+Loads ONNX, PyTorch, TFLite, CoreML, SafeTensors, and 40+ other model formats and renders their computation graphs interactively in a browser. Designed for production-scale models with thousands of nodes and multi-gigabyte weight files.
 
-1. [program.md](program.md): the execution spec for the visual curation workflow.
-2. [README.md](README.md): this high-level description.
+Key capabilities:
+
+- **Google-Maps-style viewport rendering** — only visible nodes and edges are in the DOM.
+- **On-demand weight loading** — tensor data is metadata-only by default; binary weights load per-tensor on click.
+- **Adaptive layout** — Dagre for small graphs, fast topological layout for large ones, force-directed as opt-in.
+- **Model comparison** — side-by-side diff with structural matching.
+
+## Repository Contents
+
+| File | Purpose |
+|---|---|
+| [program.md](program.md) | Full architecture spec, known issues, and optimization roadmap |
+| [README.md](README.md) | This file |
 
 ## Usage
 
-1. Open your coding agent in this repository.
-2. Ask it to follow [program.md](program.md) for a paper and optional code repository.
-3. The agent should create a new paper-specific folder with overview, diagrams, nested step pages, and snippet evidence.
+Point your coding agent at [program.md](program.md) to understand the architecture, implement fixes, or extend the application.
 
 ## License
 

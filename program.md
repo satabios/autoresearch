@@ -1,176 +1,202 @@
-# autoresearch
+# Fastron — Program Specification
 
-This repository now serves a different task: turn a research paper plus an optional GitHub repository/URL into a visual, clickable curation folder that explains how the work functions.
+Reference implementation: [satabios/fastron](https://github.com/satabios/fastron) (optimized fork of Netron).
 
-The output should feel like a guided map of the paper. A reader should be able to start from a top-level pipeline view, click into any block, and then descend into progressively more detailed “inception-like” subgraphs, with short Markdown explanations and relevant code snippets beside each step.
+## What This Application Does
 
-## Goal
+Fastron is a neural-network graph visualizer. It loads model files (ONNX, TFLite, PyTorch, CoreML, SafeTensors, and 40+ other formats), parses their computation graph, and renders an interactive, navigable visualization of every node, edge, and tensor in the model.
 
-Given:
+The core problem it solves: production models can have tens of thousands of nodes, multi-gigabyte weight files, and deeply nested subgraphs. A naive visualizer that renders everything at once will freeze the browser, exhaust memory, or produce an unusable wall of boxes. Fastron addresses this with a Google-Maps-style approach — only the nodes and edges currently in the viewport are rendered, weights are loaded on demand, and the rendering pipeline is incremental.
 
-1. A research paper, and
-2. Optionally a GitHub repo or URL that implements or relates to the paper,
+## Architecture Overview
 
-build a new folder for that paper that visually explains:
+The application has six main subsystems. All rendering is pure SVG in the browser DOM — there is no Canvas or WebGL rendering path.
 
-1. The paper’s overall pipeline.
-2. Each major stage of the method.
-3. The dependencies between stages.
-4. The implementation details in the code, when source is available.
-5. The most important snippets that support each explanation.
+### 1. Graph Parsing and Model Loading
 
-The result should be easy to browse in Obsidian, but also readable as plain Markdown and Mermaid files without any special tooling.
+**Key files:** `source/base.js`, format-specific handlers (e.g., ONNX, TFLite)
 
-## Operating principles
+The model file is read via chunked I/O. `browser.BrowserFileContext.request()` reads local files in configurable chunks (`fileReadChunkSizeMB`, default 512 MB). For large files, data flows through `browser.FileStream`, which maintains a sliding buffer window (`streamWindowSizeMB`, default 512 MB) and refills on demand.
 
-Use the paper as the source of truth. Use the repo or URL as supporting evidence when it exists. Do not invent mechanisms, data paths, or implementation details that are not grounded in the supplied sources.
+During parsing, the `base.Tensor` constructor checks `window.NETRON_CONFIG.skipTensorWeights`. When true (the default), the binary tensor data is never read — only metadata (shape, dtype, name) is extracted. This means a 5 GB ONNX file can be loaded in seconds because the parser skips over the weight blobs entirely.
 
-Prefer clarity over decoration. The visuals should make the structure of the work obvious, not merely attractive.
+**Configuration defaults** (set in `source/index.html` via `window.NETRON_CONFIG`):
 
-Prefer a shallow top-level map with deeper drill-down pages underneath. The top canvas should show the entire method at a glance; each node should then open a more detailed page or subgraph for that step.
+| Key | Default | Purpose |
+|---|---|---|
+| `skipTensorWeights` | `true` | Skip weight data during parse |
+| `cacheMaxMemoryMB` | `2048` | LRU cache budget |
+| `streamingChunkSizeMB` | `10` | Streaming chunk size |
+| `streamingThresholdMB` | `50` | File size threshold for streaming mode |
+| `fileReadChunkSizeMB` | `512` | Browser file read chunk |
+| `streamWindowSizeMB` | `512` | In-memory sliding window |
+| `maxLayoutWorkers` | `4` | Web Worker budget for layout |
+| `gpuAcceleration` | `true` | GPU compositor hints on SVG layers |
 
-Keep the artifact set deterministic so a reader can predict where to find each explanation, diagram, and snippet.
+### 2. Google-Maps-Style Viewport Rendering
 
-## Required input handling
+**Key files:** `source/grapher.js` (`TileManager`, `ViewportObserver`, `Graph`)
 
-When the user gives a paper, do the following:
+This is the core optimization. The graph canvas is divided into a spatial hash grid by `TileManager`. Tile size adapts to node count:
 
-1. Identify the paper title, core claim, and main method blocks.
-2. If a GitHub repo or URL is available, inspect it as the implementation reference.
-3. Extract a compact outline of the method before writing any visual artifacts.
-4. Decide the paper slug and use it consistently for the generated folder name and all nested files.
+| Node count | Tile size (px) |
+|---|---|
+| < 500 | 200 |
+| < 2000 | 300 |
+| < 5000 | 500 |
+| >= 5000 | 800 |
 
-If the paper or repo is ambiguous, proceed with the best supported interpretation and note the uncertainty in the overview page rather than blocking.
+Each node and edge is registered into the tiles it overlaps. When the user scrolls or zooms, `ViewportObserver` fires (debounced at 150 ms, with a 50 px movement threshold), and `TileManager.queryViewport()` returns the set of nodes and edges visible in the current viewport (plus a 2-tile buffer in each direction).
 
-## Output contract
+The visibility update pipeline:
 
-Create a new folder for each paper, named from a short slug. The folder should contain at least the following:
+1. `view.Graph.register()` sets up scroll/wheel/pointer handlers and the `ViewportObserver`.
+2. `_onViewportChange(viewport)` converts the scroll position to graph coordinates via `_getViewportBounds()`.
+3. `grapher.Graph.updateViewportVisibility(bounds)` queries the `TileManager`, computes the delta (added/removed nodes and edges), and ensures edge endpoint nodes are always visible even if outside the viewport.
+4. `grapher.Graph.updateVisibleElements(document, delta)` applies the delta: showing nodes by reattaching DOM elements or toggling `display:none`, and hiding nodes inversely.
 
-```text
-<paper-slug>/
-   README.md
-   overview.md
-   canvas.canvas
-   pipeline.mmd
-   sources.md
-   steps/
-      01-<stage>.md
-      02-<stage>.md
-   snippets/
-      01-<stage>-<snippet>.md
-      02-<stage>-<snippet>.md
-   diagrams/
-      01-<stage>.mmd
-      02-<stage>.mmd
-```
+There are three tiers of deferred DOM construction based on graph size:
 
-Use more files if needed, but keep the structure predictable:
+| Node count | Strategy |
+|---|---|
+| < 500 | Full SVG build upfront |
+| 500-5000 | Simplified `<rect>` placeholders until the node enters the viewport |
+| > 5000 | Zero DOM — nothing is created until the node scrolls into view |
 
-1. `README.md` is the human entry point.
-2. `overview.md` explains the paper in prose and links to everything else.
-3. `canvas.canvas` is the top-level Obsidian canvas that acts as the primary navigation surface.
-4. `pipeline.mmd` is the high-level Mermaid map of the whole method.
-5. `sources.md` records the paper citation, repo URL, and any other source anchors.
-6. `steps/` holds one Markdown page per major stage.
-7. `snippets/` holds short code or pseudocode excerpts tied to a single stage.
-8. `diagrams/` holds stage-level Mermaid diagrams and subgraphs.
+When a node first enters the viewport, `_ensureNodeElement()` builds the full SVG subtree (header, argument lists, attributes). This is done in chunks of 30 nodes per `requestIdleCallback` frame via `_buildVisibleNodes()`. Edges are built 60 per frame.
 
-## Visual hierarchy
+After initial build, `hideAllNodes()` hides everything, then `restore()` triggers the first viewport update to reveal only what is visible.
 
-The structure should be hierarchical:
+### 3. On-Demand Weight Loading
 
-1. Top level: a single pipeline view that names the major blocks of the method.
-2. Middle level: one page and one Mermaid diagram per block, each describing how that block works.
-3. Deep level: nested subgraphs or child pages for the important internal operations inside a block.
-4. Evidence level: code snippets, equations, or paper passages that justify the explanation.
+**Key files:** `source/base.js` (`Tensor` class), `source/view.js` (`TensorView`, `toggleWeights`)
 
-Every block on the top canvas should have a clear click target to one of the step pages. Each step page should then expose links to its Mermaid subgraph, deeper breakdown pages, and snippet files.
+Weights are off by default. The `base.Tensor` constructor sets `this._skipWeights = true` when the global config says so, and `_read()` short-circuits. The `values` and `data` getters re-check at access time, so toggling the config at runtime takes effect on the next read.
 
-If a step contains multiple internal operations, represent them as an inner graph rather than flattening them into a paragraph. Use the Mermaid diagram for structure and the Markdown page for interpretation.
+When a user clicks a node and opens its tensor detail panel, `view.TensorView.get content()` checks `value._deferred` and `skipWeights`. If either is true, only metadata is shown (shape, type, estimated size). On explicit user click, `value.read()` loads the binary data for that single tensor without reparsing the entire file.
 
-## Canvas rules
+The toggle button (`view.View.toggleWeights()`) flips the config flag, updates the toolbar button CSS class, and reloads the model.
 
-The canvas is the main navigation layer, not the place for long prose.
+### 4. Layout Engine
 
-Use the canvas to show:
+**Key files:** `source/grapher.js`, `source/view.js` (worker management)
 
-1. The full pipeline.
-2. The main blocks of the method.
-3. The most important transitions between blocks.
-4. Clickable links to the step pages.
+Three layout engines are available, selected by node count:
 
-Each node should point to a file that explains that node in more depth. Avoid duplicate content on the canvas itself.
+1. **Dagre via Web Worker** (< 3000 nodes): Standard layered graph layout. `view.Worker` manages lifecycle with budget limiting (`_workerLimit`) and timeout fallback.
+2. **`_fastLayout()`** (>= 3000 nodes): O(N+E) topological sort with longest-path rank assignment and barycenter crossing minimization (4 sweeps). Much faster than Dagre for large graphs.
+3. **`_forceLayout()`** (opt-in via `layout='force'`): Spring-repulsion simulation with Coulomb repulsion, Hooke springs, centroid gravity, and AABB collision detection. 400 iterations with cooling.
 
-## Markdown page rules
+For graphs > 500 nodes with deferred rendering, `useEstimatedNodeSizes()` returns true and layout uses fixed size constants (`_estimatedNodeWidth=150`, `_estimatedNodeHeight=65`) instead of calling `getBBox()`, avoiding expensive forced reflows.
 
-Each step page should answer four questions:
+### 5. Memory Management
 
-1. What is this step doing?
-2. Why does it exist in the overall method?
-3. What are the inputs and outputs?
-4. What code or paper text supports this interpretation?
+**Key files:** `source/cache-manager.js`, `source/browser.js`
 
-Keep each page short and focused. If a page is getting large, split it into a parent step page and a child page for the sub-operation.
+`CacheManager` is a Map-based LRU cache with a configurable memory ceiling (default 2048 MB). `set(key, data)` evicts oldest entries when the budget is exceeded. `getCacheKey(file)` generates keys from File objects.
 
-At the top of each step page, include links back to the overview and to any sibling stages so a reader can navigate laterally.
+DOM detachment mode (`_detachInvisible`): when enabled, hidden nodes and edges are removed from the DOM entirely instead of being set to `display:none`. This reduces the browser layout tree size for very large graphs, at the cost of more expensive per-toggle reattachment.
 
-## Mermaid rules
+GPU compositor hints (`will-change: transform`, `transform: translateZ(0)`, `contain: strict`) are applied to the SVG container during `view.Graph.build()`. These promote layers to the GPU compositor but do not change the rendering path — all drawing remains SVG.
 
-Use Mermaid for the method’s shape and control flow.
+### 6. Model Comparison
 
-The top `pipeline.mmd` should be simple and readable at a glance. The stage-level diagrams can be more detailed and may use nested subgraphs where appropriate.
+**Key files:** `source/comparator.js`, `source/comparator.html`
 
-Prefer Mermaid diagrams that explain:
+Side-by-side comparison of two models uses `comparator.Controller` with two independent `Graph` instances, each with its own layout worker and viewport culling. Navigation is synchronized — scroll and zoom mirror between the left and right panels.
 
-1. Data flow.
-2. Control flow.
-3. Stage ordering.
-4. Branches, merges, and repeated loops.
+Matching pipeline:
 
-Do not use Mermaid for dense prose or for unsupported detail.
+1. **Fast O(n) pass:** Weisfeiler-Leman structural hashing (2 rounds), then exact name matching (two passes: by type+name+group, then by type+name).
+2. **Deferred Hungarian pass:** Unmatched nodes are grouped by op type. Groups <= 200 nodes use O(n^3) Hungarian matching on a similarity cost matrix. Groups > 200 use greedy matching. Cross-type matching groups remaining nodes by category and repeats. Thresholds: 40 (same-type), 50 (cross-type). One type-group is processed per frame via `setTimeout(..., 0)`.
 
-## Snippet rules
+Similarity is scored on a 100-point scale: op type (50), attributes (30), shapes + connectivity (20). Diff results are rendered with CSS classes (`node-diff-modified`, `node-diff-added`, `node-diff-removed`).
 
-Snippets are sidecar evidence, not a code dump.
+## Known Issues and Required Fixes
 
-Each snippet file should:
+These are bugs and optimization gaps in the current codebase that should be addressed.
 
-1. Be short.
-2. Tie to one step only.
-3. Include a brief note about why it matters.
-4. Point back to the step page that references it.
+### 1. LRU Cache Does Not Update Access Order
 
-If the repo is available, prefer small source excerpts, function signatures, or pseudocode mirrors of the implementation. If source is not available, use paper equations or algorithmic pseudocode instead.
+**File:** `source/cache-manager.js`
 
-## Sources and grounding
+`CacheManager.get()` returns the cached value but does not move the entry to the end of the Map. This means frequently accessed entries can be evicted while rarely accessed entries survive, which is the opposite of LRU behavior.
 
-Record the paper citation and repo URL in `sources.md`.
+**Fix:** On `get()`, delete the key and re-insert it so it moves to the tail of Map iteration order.
 
-When describing a stage, ground it in one of three ways:
+### 2. ViewportObserver Debounce Has No Leading Edge
 
-1. Paper text or figure.
-2. Repository code.
-3. Reasonable synthesis that is explicitly labeled as inference.
+**File:** `source/grapher.js` (`ViewportObserver`)
 
-Do not present inference as fact. If something is inferred, say so clearly in the page text.
+The 150 ms debounce is trailing-only. The first frame of any scroll or zoom interaction shows stale content because the callback does not fire until 150 ms after motion starts.
 
-## Completion criteria
+**Fix:** Use a leading+trailing debounce. Fire immediately on the first event, then suppress until the trailing edge. This removes the initial stale frame while still batching rapid scroll events.
 
-A paper run is complete when the folder contains:
+### 3. Force Layout is O(n^2) Without Spatial Acceleration
 
-1. A top-level overview.
-2. A navigable canvas.
-3. A Mermaid pipeline map.
-4. One page per major stage.
-5. One or more nested subgraphs for the deeper operations that matter.
-6. Short code or pseudocode snippets that support the explanations.
+**File:** `source/grapher.js` (`_forceLayout`)
 
-The final folder should let a reader move from the broad method to the implementation details without losing context.
+Coulomb repulsion computes every node-pair distance. For 5000+ nodes this is 25 million distance calculations per iteration x 400 iterations.
 
-## Writing style
+**Fix:** Replace the all-pairs loop with a Barnes-Hut quadtree approximation (theta ~ 0.9). This reduces repulsion from O(n^2) to O(n log n) per iteration. The quadtree can be rebuilt each iteration in O(n log n).
 
-Write for a technically literate reader who wants structure first and detail second.
+### 4. TileManager Registration Cost for Oversized Nodes
 
-Use concise prose, direct labels, and stable file names. Avoid hype, avoid speculation, and avoid dense wall-of-text explanations when a diagram would communicate the same idea more clearly.
+**File:** `source/grapher.js` (`TileManager.addNode`)
 
-If two representations say the same thing, keep the simpler one.
+A node whose bounding box spans many tiles is registered into every tile it overlaps. For a node spanning 10x10 tiles, that is 100 tile entries for a single node.
+
+**Fix:** For nodes larger than a configurable tile-span threshold (e.g., 4x4 tiles), register them in a separate oversized-node set that is always included in viewport queries. This caps per-node registration cost at O(1).
+
+### 5. Hungarian Matching Blocks the Main Thread
+
+**File:** `source/comparator.js`
+
+The inter-group scheduling uses `setTimeout(..., 0)` to yield between type-groups, but the Hungarian algorithm within a single type-group is fully synchronous. A group of 200 Conv nodes runs O(200^3) = 8 million iterations on the main thread without yielding.
+
+**Fix:** Chunk the Hungarian inner loops. After every N iterations of the outer loop (e.g., 50), yield via `setTimeout` or `requestIdleCallback` and resume. Alternatively, move the entire matching phase into a Web Worker.
+
+### 6. No Adaptive Threshold for DOM Detachment vs Display Toggle
+
+**File:** `source/grapher.js`
+
+`_detachInvisible` is a binary flag with no documented heuristic for when to enable it. DOM detachment reduces layout tree size but increases scroll jank because reattaching elements is more expensive than toggling `display:none`.
+
+**Fix:** Set a node-count threshold. For graphs below a threshold (e.g., 10000 nodes), use `display:none` toggling. Above it, use DOM detachment. Expose the threshold in `NETRON_CONFIG` so users can tune it.
+
+### 7. SVG ViewBox Bottleneck at Extreme Scale
+
+At 100k+ nodes, the SVG coordinate space itself becomes a browser performance bottleneck regardless of viewport culling, because the SVG renderer must maintain the full coordinate system.
+
+**Fix (long-term):** For models above a configurable node threshold (e.g., 50000), switch the rendering backend from SVG to HTML5 Canvas with a virtual coordinate system. The Canvas path draws only what is visible and does not maintain persistent DOM elements. This is a significant architectural change and should be feature-flagged.
+
+## Optimization Roadmap
+
+These are enhancements beyond bug fixes, ordered by impact.
+
+### Phase 1 — Immediate Wins
+
+1. Fix LRU cache access-order bug.
+2. Add leading-edge debounce to ViewportObserver.
+3. Add adaptive DOM detachment threshold.
+4. Add oversized-node bypass in TileManager.
+
+### Phase 2 — Large Model Performance
+
+5. Barnes-Hut quadtree for force layout.
+6. Chunk or worker-ify Hungarian matching in comparator.
+7. Add level-of-detail (LOD) rendering: at low zoom levels, collapse subgraphs into single summary nodes with an expand-on-zoom interaction. This reduces visible node count without losing information.
+
+### Phase 3 — Extreme Scale
+
+8. Canvas rendering backend for 50k+ node models.
+9. Streaming graph parse: begin layout and rendering before the entire file is parsed. Feed nodes to the layout engine incrementally as they are decoded.
+10. Web Worker graph parse: move the full model parse off the main thread so the UI remains responsive during load.
+
+## Design Principles
+
+1. **Viewport first.** Never render what the user cannot see. Every node and edge must be gated by viewport visibility before any DOM work is done.
+2. **Weights are opt-in.** Tensor data is metadata-only by default. Binary weight data is loaded per-tensor on explicit user action. This keeps load times proportional to graph topology, not file size.
+3. **Progressive disclosure.** The initial view shows the top-level pipeline. Subgraphs, attributes, and tensor details are revealed on interaction, not on load.
+4. **Degrade gracefully.** Small models (< 500 nodes) get full upfront rendering for instant interactivity. Medium models get placeholder nodes. Huge models get zero-DOM deferred construction. The transitions should be invisible to the user.
+5. **Keep the main thread free.** Layout, parsing, and matching computations that exceed ~16 ms should be chunked, deferred, or moved to Web Workers.
