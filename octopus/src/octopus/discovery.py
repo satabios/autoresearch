@@ -12,11 +12,19 @@ from octopus.exceptions import InsufficientVRAMError, NoGPUsFoundError
 _log = get_logger()
 
 
-def discover_gpus(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
+def discover_gpus(
+    device_ids: Optional[list[int]] = None,
+    use_pynvml: bool = True,
+) -> list[GPUInfo]:
     """Enumerate CUDA GPUs and query their VRAM.
 
+    Prefers pynvml for physical GPU IDs and live memory readings.
+    Falls back to torch.cuda if pynvml is unavailable.
+
     Args:
-        device_ids: Restrict to these CUDA ordinals. None = all visible GPUs.
+        device_ids: Restrict to these GPU indices. None = all visible GPUs.
+        use_pynvml: Use pynvml for discovery (default True). Set False to
+            force torch.cuda path (e.g. in tests without pynvml installed).
 
     Returns:
         List of GPUInfo sorted by device_id.
@@ -24,6 +32,70 @@ def discover_gpus(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
     Raises:
         NoGPUsFoundError: No CUDA-capable GPUs found.
     """
+    if use_pynvml:
+        try:
+            return _discover_via_pynvml(device_ids)
+        except ImportError:
+            _log.info("pynvml not installed — falling back to torch.cuda for GPU discovery.")
+    return _discover_via_torch(device_ids)
+
+
+def _discover_via_pynvml(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
+    """Enumerate GPUs using pynvml (physical GPU indices, live VRAM)."""
+    import pynvml  # type: ignore[import-untyped]
+
+    pynvml.nvmlInit()
+    try:
+        count = pynvml.nvmlDeviceGetCount()
+        if count == 0:
+            raise NoGPUsFoundError("No CUDA GPUs detected via pynvml.")
+
+        ids = device_ids if device_ids is not None else list(range(count))
+        gpus: list[GPUInfo] = []
+
+        for dev_id in ids:
+            if dev_id >= count:
+                _log.warning(
+                    "Device id %d requested but only %d GPUs available, skipping.",
+                    dev_id, count,
+                )
+                continue
+            handle = pynvml.nvmlDeviceGetHandleByIndex(dev_id)
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode()
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            total_gb = float(mem.total) / (1024.0 ** 3)
+            free_gb = float(mem.free) / (1024.0 ** 3)
+
+            # Compute capability via torch if available, else (0, 0)
+            try:
+                props = torch.cuda.get_device_properties(dev_id)
+                cc = (props.major, props.minor)
+            except Exception:
+                cc = (0, 0)
+
+            gpus.append(
+                GPUInfo(
+                    device_id=dev_id,
+                    name=name,
+                    total_vram_gb=total_gb,
+                    available_vram_gb=free_gb,
+                    compute_capability=cc,
+                )
+            )
+
+        if not gpus:
+            raise NoGPUsFoundError("No valid GPUs found for the requested device_ids.")
+
+        gpus.sort(key=lambda g: g.device_id)
+        return gpus
+    finally:
+        pynvml.nvmlShutdown()
+
+
+def _discover_via_torch(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
+    """Enumerate GPUs using torch.cuda (CUDA device indices)."""
     if not torch.cuda.is_available():
         raise NoGPUsFoundError("CUDA is not available on this system.")
 
@@ -36,7 +108,10 @@ def discover_gpus(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
 
     for dev_id in ids:
         if dev_id >= count:
-            _log.warning("Device id %d requested but only %d GPUs available, skipping.", dev_id, count)
+            _log.warning(
+                "Device id %d requested but only %d GPUs available, skipping.",
+                dev_id, count,
+            )
             continue
         props = torch.cuda.get_device_properties(dev_id)
         free, total = torch.cuda.mem_get_info(dev_id)
@@ -55,6 +130,37 @@ def discover_gpus(device_ids: Optional[list[int]] = None) -> list[GPUInfo]:
 
     gpus.sort(key=lambda g: g.device_id)
     return gpus
+
+
+def poll_gpu_memory(gpu_ids: list[int]) -> dict[int, float]:
+    """Return current free VRAM (GB) for each physical GPU ID via pynvml.
+
+    Used by DynamicScheduler for live memory polling.
+
+    Args:
+        gpu_ids: Physical GPU indices to poll.
+
+    Returns:
+        {gpu_id: free_gb}. Missing entries indicate poll failure for that GPU.
+    """
+    result: dict[int, float] = {}
+    try:
+        import pynvml  # type: ignore[import-untyped]
+
+        pynvml.nvmlInit()
+        try:
+            for gpu_id in gpu_ids:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    result[gpu_id] = float(mem.free) / (1024.0 ** 3)
+                except Exception as e:
+                    _log.warning("pynvml poll failed for GPU %d: %s", gpu_id, e)
+        finally:
+            pynvml.nvmlShutdown()
+    except ImportError:
+        _log.warning("pynvml not available — poll_gpu_memory returning empty dict.")
+    return result
 
 
 def compute_worker_allocation(

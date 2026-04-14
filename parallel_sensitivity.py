@@ -72,9 +72,13 @@ _WORKER_SCRIPT = Path(__file__).parent / "sensitivity_worker.py"
 # S × N seconds apart — enough for the previous worker to finish CUDA init
 # before the next one starts.
 #
-# Example: N=4, S=5 → same-GPU workers are 20 s apart.
-# Total extra launch overhead = (P-1) × S  (e.g. 47 × 5 = 235 s for P=48).
-WORKER_LAUNCH_STAGGER_SECONDS: float = 5.0
+# Example: N=4, S=2 → same-GPU workers are 8 s apart.
+# Total extra launch overhead = (P-1) × S  (e.g. 35 × 2 = 70 s for P=36).
+#
+# Calibration: CUDA context init on RTX 5000 Ada takes ~1-2 s.  A 2 s stagger
+# gives 8 s between same-GPU workers (4 GPUs × 2 s), which is sufficient.
+# Reducing from 5 s to 2 s saves ~105 s per scan step for P=36 workers.
+WORKER_LAUNCH_STAGGER_SECONDS: float = 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +146,16 @@ def _nvidia_smi_used_mb(gpu_id: int) -> float:
 # difference between a plain ORT session (probe) and a QuantizationSimModel
 # (workers), which wraps the session with additional AIMET state and may
 # trigger slightly larger CUDA allocations during the enabling loop.
-_VRAM_PROBE_SAFETY_MULTIPLIER: float = 1.25
+#
+# Calibration (RTX 5000 Ada, InternViT300M_Pixel_Unshuffle_MLP1):
+#   Raw probe (n_warmup=20) ≈ 2.37 GB
+#   Actual per-worker peak (observed via nvtop) ≈ 2.37 GB
+#   Ratio: 1.00 — the probe already captures the dominant cost (model load).
+#   A 1.10× multiplier provides a 10% safety margin above the raw probe,
+#   which is sufficient given that the actual usage matches the probe closely.
+#   The previous 1.25× multiplier was overly conservative (adds 0.59 GB
+#   overhead that is never consumed), reducing effective worker count.
+_VRAM_PROBE_SAFETY_MULTIPLIER: float = 1.10
 
 
 def estimate_vram_gb(

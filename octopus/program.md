@@ -1,5 +1,21 @@
 # Octopus — Development Roadmap for Production QuantSim Integration
 
+## Main Goal
+
+Given a for loop with a PyTorch/ORT/QuantSim model eval/inference call
+
+for i in range(N):
+    # PyTorch/ORT/QuantSim model eval/inference call
+
+We want to be able to:
+
+Estimate the resources available on the machine and paralelize the runs:
+
+with Octopus():
+    for i in range(N):
+        # PyTorch/ORT/QuantSim model eval/inference call (in parallel)
+
+        
 ## Context
 
 Octopus (phases 1-9, 46 tests passing) provides GPU worker parallelization for PyTorch, ONNX Runtime, and AIMET QuantSim models. The parent directory contains battle-tested production code for parallel ONNX QuantSim sensitivity analysis:

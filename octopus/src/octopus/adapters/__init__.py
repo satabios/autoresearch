@@ -12,14 +12,26 @@ def detect_and_wrap(model: Any, eval_fn: Callable) -> ModelAdapter:
     """Auto-detect model type and return the appropriate adapter.
 
     Detection order:
-        1. AIMET QuantizationSimModel (wraps nn.Module, must check first)
-        2. ONNX Runtime InferenceSession
-        3. torch.nn.Module (catch-all for PyTorch)
+        1. AIMET ONNX QuantizationSimModel (check before aimet_torch)
+        2. AIMET Torch QuantizationSimModel (wraps nn.Module)
+        3. ONNX Runtime InferenceSession
+        4. torch.nn.Module (catch-all for PyTorch)
 
     Raises:
         TypeError: if model type is not recognized.
     """
-    # AIMET QuantSim check
+    # AIMET ONNX QuantSim check (must precede aimet_torch — different class)
+    try:
+        from octopus.adapters.onnx_quantsim import OnnxQuantSimAdapter
+
+        from aimet_onnx.quantsim import QuantizationSimModel as OnnxQuantSim  # type: ignore[import-untyped]
+
+        if isinstance(model, OnnxQuantSim):
+            return OnnxQuantSimAdapter(model, eval_fn)
+    except ImportError:
+        pass
+
+    # AIMET Torch QuantSim check
     try:
         from octopus.adapters.quantsim import QuantSimAdapter
 
@@ -69,6 +81,12 @@ def _register_lazy() -> None:
         from octopus.adapters.quantsim import QuantSimAdapter
 
         _ADAPTER_REGISTRY["quantsim"] = QuantSimAdapter
+    except ImportError:
+        pass
+    try:
+        from octopus.adapters.onnx_quantsim import OnnxQuantSimAdapter
+
+        _ADAPTER_REGISTRY["onnx_quantsim"] = OnnxQuantSimAdapter
     except ImportError:
         pass
 

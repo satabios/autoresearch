@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Optional
 
 import ray
@@ -9,6 +10,8 @@ from octopus._types import PoolPlan
 from octopus.worker import InferenceWorker, ShardedInferenceWorkerGroup
 
 _log = get_logger()
+
+WORKER_LAUNCH_STAGGER_S = 5.0
 
 
 class WorkerPool:
@@ -24,11 +27,15 @@ class WorkerPool:
         model_bytes: bytes,
         adapter_cls_name: str,
         eval_fn: Callable,
+        stagger_init_s: float = 0.0,
+        enable_mps: bool = False,
     ) -> None:
         self._plan = pool_plan
         self._model_bytes = model_bytes
         self._adapter_cls_name = adapter_cls_name
         self._eval_fn = eval_fn
+        self._stagger_init_s = stagger_init_s
+        self._enable_mps = enable_mps
         self._workers: list[ray.actor.ActorHandle] = []
         self._round_robin_idx = 0
 
@@ -40,29 +47,69 @@ class WorkerPool:
             self._start_standard()
 
     def _start_standard(self) -> None:
-        """Spawn standard (non-sharded) workers."""
-        actors_to_init = []
+        """Spawn standard (non-sharded) workers.
+
+        Workers on different GPUs are spawned in parallel.
+        Workers on the *same* GPU are staggered by stagger_init_s seconds to
+        avoid CUDA init races (BFCArena / CUBLAS_STATUS_ALLOC_FAILED).
+        """
+        # Group actors by GPU so we can stagger same-GPU inits
+        actors_by_gpu: dict[int, list[ray.actor.ActorHandle]] = {}
 
         for alloc in self._plan.allocations:
             frac_gpu = 1.0 / alloc.num_workers if alloc.num_workers > 0 else 1.0
+            env_vars: dict[str, str] = {"CUDA_VISIBLE_DEVICES": str(alloc.device_id)}
+            if self._enable_mps:
+                env_vars["CUDA_MPS_PIPE_DIRECTORY"] = f"/tmp/nvidia-mps-gpu{alloc.device_id}"
+                env_vars["CUDA_MPS_LOG_DIRECTORY"] = f"/tmp/nvidia-log-gpu{alloc.device_id}"
+
+            gpu_actors: list[ray.actor.ActorHandle] = []
             for _ in range(alloc.num_workers):
                 actor = InferenceWorker.options(
                     num_gpus=frac_gpu,
-                    runtime_env={
-                        "env_vars": {"CUDA_VISIBLE_DEVICES": str(alloc.device_id)}
-                    },
+                    runtime_env={"env_vars": env_vars},
                 ).remote(
                     self._model_bytes,
                     self._adapter_cls_name,
                     self._eval_fn,
                 )
-                actors_to_init.append(actor)
+                gpu_actors.append(actor)
+            actors_by_gpu[alloc.device_id] = gpu_actors
 
-        # Initialize all workers in parallel
-        init_refs = [a.initialize.remote() for a in actors_to_init]
+        # Fire first worker on each GPU simultaneously, then stagger within each GPU group
+        stagger = self._stagger_init_s
+        all_actors: list[ray.actor.ActorHandle] = []
+        init_refs: list[ray.ObjectRef] = []
+
+        if stagger <= 0:
+            # No stagger — init all in parallel (original behaviour)
+            for gpu_actors in actors_by_gpu.values():
+                for actor in gpu_actors:
+                    init_refs.append(actor.initialize.remote())
+                    all_actors.append(actor)
+        else:
+            # Stagger same-GPU workers; different GPUs run in parallel
+            # Build per-GPU init sequences, interleaved by slot index
+            max_per_gpu = max(len(v) for v in actors_by_gpu.values())
+            for slot in range(max_per_gpu):
+                slot_actors = [
+                    actors[slot]
+                    for actors in actors_by_gpu.values()
+                    if slot < len(actors)
+                ]
+                for actor in slot_actors:
+                    init_refs.append(actor.initialize.remote())
+                    all_actors.append(actor)
+                if slot < max_per_gpu - 1:
+                    _log.info(
+                        "Staggering worker init: sleeping %.1fs before slot %d",
+                        stagger,
+                        slot + 1,
+                    )
+                    time.sleep(stagger)
+
         results = ray.get(init_refs)
-
-        for actor, result in zip(actors_to_init, results):
+        for actor, result in zip(all_actors, results):
             _log.info("Worker ready: %s", result)
             self._workers.append(actor)
 

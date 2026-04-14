@@ -43,9 +43,13 @@ from typing import NamedTuple
 JOB_TABLE = [
     # module                                                      opt  gpu
     # Job 1: InternViT300M_Pixel_Unshuffle_MLP1 / katana (optimized=2)
-    {"module": "InternViT300M_Pixel_Unshuffle_MLP1",             "optimized": 1, "gpu": 0},
+    {"module": "InternViT300M_Pixel_Unshuffle_MLP1",             "optimized": 0, "gpu": 0},
+    # {"module": "InternViT300M_Pixel_Unshuffle_MLP1",             "optimized": 1, "gpu": 0},
+    {"module": "InternViT300M_Pixel_Unshuffle_MLP1",             "optimized": 2, "gpu": 0},
     # Job 2: nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA / sabre (optimized=1)
-    {"module": "nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA", "optimized": 1, "gpu": 1},
+    {"module": "nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA", "optimized": 0, "gpu": 1},
+    # {"module": "nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA", "optimized": 1, "gpu": 1},
+    {"module": "nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA", "optimized": 2, "gpu": 1},
 ]
 # fmt: on
 
@@ -75,6 +79,8 @@ JOB_TABLE = [
 #   • No sensitivity flags are passed to quant.py.
 # ---------------------------------------------------------------------------
 PARALLEL_SENSITIVITY  = True           # jobs run sequentially; each gets full GPU pool
+DYNAMIC_SCHEDULING    = True           # use Ray-based dynamic scheduler (requires ray[default])
+                                       # set False to fall back to static subprocess workers
 SENSITIVITY_GPU_POOL  = [0, 1, 2, 3]  # GPUs available for sensitivity-scan workers
 VRAM_PER_GPU_GB       = 32.0           # M: VRAM per GPU in GB
 CUSHION_GB            = 3.0            # O fallback: reserved per GPU for OS/driver safety
@@ -99,12 +105,16 @@ GPU_HEADROOM_GB       = 0.5            # per-GPU global VRAM headroom (GB) deduc
 #
 # Values below are empirically calibrated for this codebase:
 #   InternViT300M_Pixel_Unshuffle_MLP1:
-#       FP32 ONNX ~2.4 GB → QDQ-augmented ~5-6 GB.  sn = 1.5 GB.
+#       Observed actual per-worker VRAM = 2.37 GB (raw probe, oob run).
+#       Probe with 1.10× multiplier → m_u = 2.61 GB.
+#       Actual peak never exceeded raw probe value during full scan, so
+#       sn = 0.5 GB (driver/fragmentation overhead only) is sufficient.
+#       U = 2.61 + 0.50 = 3.11 GB → 9 workers/GPU (vs 6 with sn=1.5).
 #   nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA:
 #       Larger LLM backbone with longer activation buffers.  sn = 2.5 GB.
 # ---------------------------------------------------------------------------
 ARCHITECTURE_SAFETY_NET_GB: dict[str, float] = {
-    "InternViT300M_Pixel_Unshuffle_MLP1":             1.5,
+    "InternViT300M_Pixel_Unshuffle_MLP1":             0.5,  # reduced from 1.5; actual peak ≈ raw probe (2.37 GB)
     "nCoT_Token_Interleaver_Qwen2_05_RouteSpeed_VLA": 2.5,
 }
 DEFAULT_SN_PER_WORKER_GB: float = 2.0   # fallback for any unlisted module
@@ -176,6 +186,8 @@ def _build_cmd(job: Job) -> list[str]:
             "--sn-per-worker",       str(sn),
             "--gpu-headroom-gb",     str(GPU_HEADROOM_GB),
         ]
+        if DYNAMIC_SCHEDULING:
+            cmd.append("--dynamic-scheduling")
     return cmd
 
 
@@ -251,7 +263,8 @@ def _launch_sequential(jobs: list[Job], dry_run: bool = False) -> None:
     col = 60
 
     print(f"\n{'='*72}")
-    print(f"  Launching {len(jobs)} job(s) SEQUENTIALLY (PARALLEL_SENSITIVITY=True)")
+    sched_mode = "Ray dynamic" if DYNAMIC_SCHEDULING else "static subprocess"
+    print(f"  Launching {len(jobs)} job(s) SEQUENTIALLY (PARALLEL_SENSITIVITY=True, scheduler={sched_mode})")
     print(f"  Sensitivity GPU pool: {SENSITIVITY_GPU_POOL}")
     print(f"  VRAM per GPU: {VRAM_PER_GPU_GB} GB  |  Cushion (O fallback): {CUSHION_GB} GB  |  GPU headroom: {GPU_HEADROOM_GB} GB")
     print(f"  Per-architecture sn: {ARCHITECTURE_SAFETY_NET_GB}  |  default: {DEFAULT_SN_PER_WORKER_GB} GB")
@@ -404,6 +417,12 @@ if __name__ == "__main__":
         help="Print commands without launching any processes",
     )
     parser.add_argument(
+        "--dynamic-scheduling", action=argparse.BooleanOptionalAction, default=None,
+        help="Enable (--dynamic-scheduling) or disable (--no-dynamic-scheduling) "
+             "Ray-based dynamic scheduler.  "
+             f"Overrides the DYNAMIC_SCHEDULING constant (default: {DYNAMIC_SCHEDULING}).",
+    )
+    parser.add_argument(
         "--gpu-headroom-gb", type=float, default=None,
         help="Per-GPU global VRAM headroom in GB deducted before computing workers_g "
              "(effective_avail = currgpu_avail - gpu_headroom_gb).  "
@@ -426,6 +445,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Apply CLI overrides to module-level constants so _build_cmd() picks them up.
+    if getattr(args, "dynamic_scheduling", None) is not None:
+        DYNAMIC_SCHEDULING = args.dynamic_scheduling
     if args.gpu_headroom_gb is not None:
         GPU_HEADROOM_GB = args.gpu_headroom_gb
     if args.vram_per_gpu is not None:
