@@ -70,7 +70,7 @@ def validate_sharding_configuration(
     sharding_strategy: ShardingMode,
 ) -> None:
     """Fail fast when backend/sharding combination is not supported."""
-    if sharding_strategy == "none":
+    if sharding_strategy in ("none", "auto"):
         return
 
     caps = get_backend_capabilities(model_type_name)

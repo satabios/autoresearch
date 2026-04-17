@@ -13,6 +13,10 @@ _log = get_logger()
 
 _MAX_RAY_WORKERS_PER_GPU = 10_000
 
+# Preferred sharding strategy order when auto-selecting.
+# PP is more general (works across all backends, all architectures).
+_SHARDING_PREFERENCE = ("pp", "tp")
+
 
 def discover_gpus(
     device_ids: Optional[list[int]] = None,
@@ -349,3 +353,85 @@ def _cap_workers(
         )
 
     return sum(a.num_workers for a in capped), capped
+
+
+def recommend_strategy(
+    gpus: list[GPUInfo],
+    model_vram_gb: float,
+    safety_net_gb: float = 1.0,
+    backend_capabilities: Optional[dict] = None,
+    workers_per_gpu: Optional[int] = None,
+    max_workers: Optional[int] = None,
+) -> PoolPlan:
+    """Automatically choose the best execution strategy.
+
+    Decision order:
+        1. If model fits on at least one GPU → replica workers (Flow A/B).
+        2. If model does not fit → pick the best supported sharding strategy
+           from the backend capability matrix (prefers PP over TP).
+        3. If no sharding strategies are available → raise InsufficientVRAMError.
+
+    Args:
+        gpus: discovered GPUInfo list.
+        model_vram_gb: peak VRAM needed for the full model + one forward pass.
+        safety_net_gb: reserved headroom per GPU.
+        backend_capabilities: dict from ``get_backend_capabilities()``.
+            Used to determine which sharding strategies are supported.
+            If *None*, assumes replica-only (no sharding fallback).
+        workers_per_gpu: optional per-GPU cap.
+        max_workers: optional cap on total workers.
+
+    Returns:
+        PoolPlan — ready to use by WorkerPool.
+
+    Raises:
+        InsufficientVRAMError: model cannot fit on any GPU and no
+            supported sharding strategy exists.
+    """
+    best_free = max(g.available_vram_gb for g in gpus) if gpus else 0.0
+    fits_single_gpu = model_vram_gb + safety_net_gb <= best_free
+
+    if fits_single_gpu:
+        plan = compute_worker_allocation(
+            gpus, model_vram_gb, safety_net_gb, workers_per_gpu, max_workers,
+        )
+        _log.info(
+            "auto: model fits on single GPU (%.2f GB needed, %.2f GB available) "
+            "→ replica workers (%d worker(s))",
+            model_vram_gb + safety_net_gb, best_free, plan.total_workers,
+        )
+        return plan
+
+    # Model too large — try sharding
+    supported: tuple[str, ...] = ()
+    if backend_capabilities is not None:
+        supported = tuple(backend_capabilities.get("shared_model_sharding_strategies", ()))
+
+    if not supported:
+        raise InsufficientVRAMError(
+            f"Model requires {model_vram_gb:.2f} GB VRAM but the most available "
+            f"on any GPU is {best_free:.2f} GB (after {safety_net_gb:.2f} GB safety net). "
+            f"Backend does not support sharding. "
+            f"Consider using a backend with sharding support (e.g. PyTorch with "
+            f"sharding_strategy='pp')."
+        )
+
+    # Pick best strategy: prefer PP (more general), then TP
+    chosen = None
+    for pref in _SHARDING_PREFERENCE:
+        if pref in supported:
+            chosen = pref
+            break
+    if chosen is None:
+        chosen = supported[0]
+
+    plan = compute_sharded_allocation(
+        gpus, model_vram_gb, safety_net_gb, chosen, max_workers,
+    )
+    _log.info(
+        "auto: model needs sharding (%.2f GB needed, %.2f GB max per GPU) "
+        "→ %s sharding (%d shard group(s), %d GPU(s) per shard)",
+        model_vram_gb, best_free, chosen.upper(),
+        plan.total_workers, plan.gpus_per_shard,
+    )
+    return plan

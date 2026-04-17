@@ -54,6 +54,25 @@ class TestOctopusCore:
             assert o.num_workers == 0  # not initialized yet
             assert o.gpu_info == []
 
+    def test_default_sharding_strategy_is_auto(self):
+        """Default sharding_strategy should be 'auto'."""
+        from octopus.core import Octopus
+
+        model = nn.Linear(10, 5)
+        o = Octopus(model=model, eval_fn=lambda m, b: m(b), log_level="WARNING")
+        assert o._sharding_strategy == "auto"
+
+    def test_explicit_none_still_works(self):
+        """Passing sharding_strategy='none' explicitly should still work."""
+        from octopus.core import Octopus
+
+        model = nn.Linear(10, 5)
+        o = Octopus(
+            model=model, eval_fn=lambda m, b: m(b),
+            sharding_strategy="none", log_level="WARNING",
+        )
+        assert o._sharding_strategy == "none"
+
     def test_context_manager_calls_shutdown(self):
         """Exiting context should call shutdown."""
         with patch("octopus.core.discover_gpus"), \

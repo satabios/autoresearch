@@ -19,6 +19,7 @@ from octopus.discovery import (
     compute_sharded_allocation,
     compute_worker_allocation,
     discover_gpus,
+    recommend_strategy,
 )
 from octopus.iterator import OrderedResultIterator, UnorderedResultIterator
 from octopus.pool import WorkerPool
@@ -56,7 +57,7 @@ class Octopus:
         model: Any,
         eval_fn: Callable[[Any, Any], Any],
         safety_net_gb: float = 1.0,
-        sharding_strategy: ShardingMode = "none",
+        sharding_strategy: ShardingMode = "auto",
         ordered: bool = True,
         gpu_ids: Optional[list[int]] = None,
         ray_address: Optional[str] = None,
@@ -74,8 +75,10 @@ class Octopus:
             model: PyTorch nn.Module, ORT InferenceSession, or AIMET QuantSim model.
             eval_fn: Callable(model, batch) -> result. Called by each worker.
             safety_net_gb: VRAM to reserve per GPU (default 1.0 GB).
-            sharding_strategy: "tp" for tensor parallel, "pp" for pipeline
-                parallel, "none" to disable (error if model too large).
+            sharding_strategy: "auto" (default) to let Octopus pick the best
+                strategy based on model VRAM and available GPUs. "tp" to force
+                tensor parallel, "pp" to force pipeline parallel, "none" to
+                force replica workers only (error if model too large).
             ordered: If True, results yielded in dataset order.
                 If False, results yielded as workers complete (faster).
             gpu_ids: Restrict to these CUDA ordinals. None = all GPUs.
@@ -148,7 +151,18 @@ class Octopus:
         _log.info("Model VRAM usage (U): %.2f GB", self._profile.peak_vram_gb)
 
         # 3. Compute allocation
-        if self._sharding_strategy == "none":
+        if self._sharding_strategy == "auto":
+            self._plan = recommend_strategy(
+                self._gpus,
+                self._profile.peak_vram_gb,
+                self._safety_net_gb,
+                backend_capabilities=get_backend_capabilities(
+                    self._adapter.model_type_name
+                ),
+                workers_per_gpu=self._workers_per_gpu,
+                max_workers=self._max_workers,
+            )
+        elif self._sharding_strategy == "none":
             self._plan = compute_worker_allocation(
                 self._gpus,
                 self._profile.peak_vram_gb,
@@ -326,13 +340,25 @@ class Octopus:
                 profiling_gpu = pick_profiling_gpu(self._gpus)
                 self._profile = profile_model_vram(self._adapter, None, device_id=profiling_gpu)
 
-            self._plan = compute_worker_allocation(
-                self._gpus,
-                self._profile.peak_vram_gb,
-                self._safety_net_gb,
-                self._workers_per_gpu,
-                self._max_workers,
-            )
+            if self._sharding_strategy == "auto":
+                self._plan = recommend_strategy(
+                    self._gpus,
+                    self._profile.peak_vram_gb,
+                    self._safety_net_gb,
+                    backend_capabilities=get_backend_capabilities(
+                        self._adapter.model_type_name
+                    ),
+                    workers_per_gpu=self._workers_per_gpu,
+                    max_workers=self._max_workers,
+                )
+            else:
+                self._plan = compute_worker_allocation(
+                    self._gpus,
+                    self._profile.peak_vram_gb,
+                    self._safety_net_gb,
+                    self._workers_per_gpu,
+                    self._max_workers,
+                )
             _log.info(
                 "Worker plan: %d worker(s), model VRAM=%.2f GB",
                 self._plan.total_workers,

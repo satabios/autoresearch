@@ -47,6 +47,38 @@ Flow B: omit `workers_per_gpu` to pack as many workers as VRAM allows, or set `m
 
 ---
 
+## Automatic Strategy Selection
+
+By default, `sharding_strategy="auto"`. Octopus profiles VRAM and GPU resources, then picks the optimal execution strategy:
+
+```
+                   ┌─────────────────────────────┐
+                   │  Profile model VRAM (U)      │
+                   │  Discover GPUs               │
+                   └──────────┬──────────────────┘
+                              │
+                   ┌──────────▼──────────────────┐
+                   │  U + safety_net ≤ best GPU?  │
+                   └──────────┬──────────────────┘
+                         YES  │  NO
+                   ┌──────────▼──┐  ┌────────────▼───────────┐
+                   │  Replica    │  │  Shard across GPUs     │
+                   │  workers    │  │  PP preferred (safer)  │
+                   │  (Flow A/B) │  │  TP for PyTorch if     │
+                   │             │  │  PP unavailable        │
+                   └─────────────┘  └────────────────────────┘
+```
+
+Override with explicit strategy when needed:
+
+```python
+Octopus(..., sharding_strategy="none")   # force replicas, error if too large
+Octopus(..., sharding_strategy="pp")     # force pipeline parallel
+Octopus(..., sharding_strategy="tp")     # force tensor parallel (PyTorch only)
+```
+
+---
+
 ## Quick Start
 
 ### Pattern 1 — `submit` / `gather` (parallel for-loop)
@@ -102,7 +134,7 @@ Octopus(
     model,                          # nn.Module | ort.InferenceSession | QuantSim
     eval_fn,                        # Callable(model, batch) -> result
     safety_net_gb   = 1.0,          # VRAM reserved per GPU (headroom)
-    sharding_strategy = "none",     # "tp" | "pp" | "none"
+    sharding_strategy = "auto",     # "auto" | "tp" | "pp" | "none"
     ordered         = True,         # preserve submission order in results
     gpu_ids         = None,         # restrict to specific GPU indices
     ray_address     = None,         # Ray cluster address (None = local)

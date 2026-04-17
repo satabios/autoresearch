@@ -25,6 +25,39 @@ for x in inputs:                 ┌──────────────�
 
 ---
 
+## Automatic Strategy Selection (default)
+
+Octopus picks the best strategy automatically based on model size and available GPUs.
+No need to specify `sharding_strategy` — it defaults to `"auto"`.
+
+```
+                    ┌──────────────────────────┐
+                    │  1. Profile model VRAM    │
+                    │  2. Discover GPUs         │
+                    └────────────┬─────────────┘
+                                 │
+                    ┌────────────▼─────────────┐
+                    │  Model fits on 1 GPU?    │
+                    └─────┬──────────────┬─────┘
+                      YES │              │ NO
+               ┌──────────▼──────┐  ┌────▼──────────────┐
+               │  Replica workers │  │  Shard across GPUs │
+               │  (Flow A / B)   │  │  PP → TP fallback  │
+               └─────────────────┘  └───────────────────┘
+```
+
+```python
+# auto (default) — Octopus decides
+with Octopus(model=model, eval_fn=eval_fn) as o:
+    results = o.map(inputs)
+
+# explicit override when you know better
+Octopus(..., sharding_strategy="pp")     # force pipeline parallel
+Octopus(..., sharding_strategy="none")   # force replicas only
+```
+
+---
+
 ## Flow A — One Replica Per GPU
 
 `workers_per_gpu=1` places exactly one model copy on each usable GPU.
