@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "octopus"
+version = "0.1.0"
+description = "GPU worker parallelization for model inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+    "ray[default]>=2.9",
+    "torch>=2.1",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+onnx = [
+    "onnxruntime-gpu>=1.16",
+]
+aimet = [
+    "aimet-torch>=1.30",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "mypy>=1.5",
+    "ruff>=0.1",
+]
+all = [
+    "octopus[onnx,aimet,dev]",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/octopus"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires real CUDA GPU (deselect with -m 'not gpu')",
+    "slow: long-running integration tests",
+    "sensitivity: AIMET ONNX sensitivity analysis tests",
+]
