@@ -1,6 +1,8 @@
-# Octopus Parallelism
+<h1 align="center">Octopus Parallelism</h1>
 
-![Octopus](./octopus.png)
+<p align="center">
+  <img src="./octopus.png" alt="Octopus" width="720" />
+</p>
 
 Octopus wraps a single `for` loop and spreads it across multiple GPU workers automatically.
 

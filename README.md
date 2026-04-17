@@ -1,7 +1,10 @@
-# Octopus
+<h1 align="center">Octopus</h1>
 
 Octopus is a lightweight library for automatic multi-worker model inference on Ray clusters with automatic GPU allocation.
-![alt text](./octopus.png)
+
+<p align="center">
+  <img src="./octopus.png" alt="Octopus" width="720" />
+</p>
 
 GPU worker parallelization for model inference. Supports PyTorch `nn.Module`, ONNX Runtime `InferenceSession`, and AIMET QuantSim models. Automatically profiles VRAM, discovers GPUs, and distributes work across Ray-managed workers.
 
