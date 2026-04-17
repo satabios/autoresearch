@@ -58,50 +58,37 @@ Octopus(..., sharding_strategy="none")   # force replicas only
 
 ---
 
-## Flow A — One Replica Per GPU
+## Replica Workers (default for models that fit on one GPU)
 
-`workers_per_gpu=1` places exactly one model copy on each usable GPU.
-Best when each GPU can hold the full model and you want maximum isolation.
+By default, Octopus profiles VRAM and auto-packs as many model copies per GPU
+as free memory allows:
 
 ```
-GPU 0          GPU 1          GPU 2          GPU 3
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│ model[0] │   │ model[1] │   │ model[2] │   │ model[3] │
-│          │   │          │   │          │   │          │
-│ batch 0  │   │ batch 1  │   │ batch 2  │   │ batch 3  │
-│ batch 4  │   │ batch 5  │   │ batch 6  │   │ batch 7  │
-│  ...     │   │  ...     │   │  ...     │   │  ...     │
-└──────────┘   └──────────┘   └──────────┘   └──────────┘
+N = floor((available_vram - safety_net) / model_vram)   per GPU
+```
+
+```
+GPU 0  (8 GB, model=2 GB)      GPU 1  (8 GB, model=2 GB)
+┌───────────────────────┐       ┌───────────────────────┐
+│ worker A │ worker B   │       │ worker C │ worker D   │
+│ model    │ model      │       │ model    │ model      │
+│ [2 GB]   │ [2 GB]     │       │ [2 GB]   │ [2 GB]     │
+│       ↑ safety net    │       │       ↑ safety net    │
+└───────────────────────┘       └───────────────────────┘
+  N = floor((8-1)/2) = 3 workers per GPU (diagram shows 2 for clarity)
 ```
 
 ```python
+# Default: auto-pack as many workers as VRAM allows
+with Octopus(model=model, eval_fn=eval_fn) as o:
+    results = o.map(inputs)
+
+# Cap total workers across all GPUs
+with Octopus(model=model, eval_fn=eval_fn, max_workers=4) as o:
+    results = o.map(inputs)
+
+# Force exactly 1 worker per GPU (for isolation / debugging)
 with Octopus(model=model, eval_fn=eval_fn, workers_per_gpu=1) as o:
-    results = o.map(inputs)
-```
-
----
-
-## Flow B — Pack Workers by VRAM
-
-Omit `workers_per_gpu` and Octopus profiles VRAM usage, then packs as many
-replicas per GPU as free memory allows.
-
-```
-GPU 0                       GPU 1
-┌───────────────────────┐   ┌───────────────────────┐
-│ worker A │ worker B   │   │ worker C │ worker D   │
-│ model    │ model      │   │ model    │ model      │
-│ [2 GB]   │ [2 GB]     │   │ [2 GB]   │ [2 GB]     │
-│          ↑ 1 GB free  │   │          ↑ 1 GB free  │
-└───────────────────────┘   └───────────────────────┘
-  ← 8 GB GPU, safety_net_gb=1.0 →
-```
-
-```python
-with Octopus(model=model, eval_fn=eval_fn) as o:        # auto-pack
-    results = o.map(inputs)
-
-with Octopus(model=model, eval_fn=eval_fn, max_workers=4) as o:   # cap at 4
     results = o.map(inputs)
 ```
 

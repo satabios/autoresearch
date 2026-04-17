@@ -42,8 +42,8 @@ Octopus:
 4. **Spawns** Ray actors, each owning one model copy
 5. **Distributes** batches across workers and collects results
 
-Flow A: set `workers_per_gpu=1` for one model worker on each usable GPU.
-Flow B: omit `workers_per_gpu` to pack as many workers as VRAM allows, or set `max_workers=K`.
+Flow A: set `workers_per_gpu=1` for one model worker on each usable GPU (isolation).
+Flow B (default): omit `workers_per_gpu` — Octopus auto-packs `N = floor((free_vram - safety_net) / model_vram)` workers per GPU. Optionally cap with `max_workers=K`.
 
 ---
 
