@@ -366,7 +366,7 @@ def recommend_strategy(
     """Automatically choose the best execution strategy.
 
     Decision order:
-        1. If model fits on at least one GPU → replica workers (Flow A/B).
+        1. If model fits on at least one GPU → replica workers (auto-pack).
         2. If model does not fit → pick the best supported sharding strategy
            from the backend capability matrix (prefers PP over TP).
         3. If no sharding strategies are available → raise InsufficientVRAMError.

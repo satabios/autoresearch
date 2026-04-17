@@ -1,4 +1,4 @@
-# Octopus — How Parallelism Works
+# Octopus Parallelism
 
 ![Octopus](./octopus.png)
 
@@ -42,7 +42,7 @@ No need to specify `sharding_strategy` — it defaults to `"auto"`.
                       YES │              │ NO
                ┌──────────▼──────┐  ┌────▼──────────────┐
                │  Replica workers │  │  Shard across GPUs │
-               │  (Flow A / B)   │  │  PP → TP fallback  │
+               │  (auto-pack)   │  │  PP → TP fallback  │
                └─────────────────┘  └───────────────────┘
 ```
 

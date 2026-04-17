@@ -42,8 +42,7 @@ Octopus:
 4. **Spawns** Ray actors, each owning one model copy
 5. **Distributes** batches across workers and collects results
 
-Flow A: set `workers_per_gpu=1` for one model worker on each usable GPU (isolation).
-Flow B (default): omit `workers_per_gpu` — Octopus auto-packs `N = floor((free_vram - safety_net) / model_vram)` workers per GPU. Optionally cap with `max_workers=K`.
+By default Octopus auto-packs `N = floor((free_vram - safety_net) / model_vram)` workers per GPU. Set `workers_per_gpu=1` for isolation, or `max_workers=K` to cap total workers.
 
 ---
 
@@ -64,7 +63,7 @@ By default, `sharding_strategy="auto"`. Octopus profiles VRAM and GPU resources,
                    ┌──────────▼──┐  ┌────────────▼───────────┐
                    │  Replica    │  │  Shard across GPUs     │
                    │  workers    │  │  PP preferred (safer)  │
-                   │  (Flow A/B) │  │  TP for PyTorch if     │
+                   │  (auto-pack) │  │  TP for PyTorch if     │
                    │             │  │  PP unavailable        │
                    └─────────────┘  └────────────────────────┘
 ```
@@ -212,7 +211,7 @@ Adapters handle serialization (`state_bytes()` / `from_state_bytes()`) so model 
 
 Support summary:
 
-| Backend | Flow A / Flow B replica workers | Shared model across N GPUs |
+| Backend | Replica workers (auto-pack) | Shared model across N GPUs |
 |---|---|---|
 | PyTorch | ✅ | ✅ with `sharding_strategy="pp"` and `sharding_strategy="tp"` |
 | ONNX Runtime | ✅ | ✅ with `sharding_strategy="pp"` |
