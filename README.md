@@ -23,6 +23,8 @@ pip install -e ".[all]"    # everything
 
 ## Core Concept
 
+> **Visual guide:** See [Parallelism.md](./Parallelism.md) for ASCII diagrams of replica workers, Pipeline Parallel, and Tensor Parallel layouts.
+
 ```
 Before                              After
 ──────────────────────────────────  ──────────────────────────────────────────
