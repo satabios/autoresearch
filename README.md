@@ -1,10 +1,7 @@
-<h1 align="center">Octopus</h1>
+# Octopus
 
 Octopus is a lightweight library for automatic multi-worker model inference on Ray clusters with automatic GPU allocation.
-
-<p align="center">
-  <img src="./octopus.png" alt="Octopus" width="720" />
-</p>
+![alt text](./octopus.png)
 
 GPU worker parallelization for model inference. Supports PyTorch `nn.Module`, ONNX Runtime `InferenceSession`, and AIMET QuantSim models. Automatically profiles VRAM, discovers GPUs, and distributes work across Ray-managed workers.
 
@@ -17,16 +14,24 @@ pip install -e .
 
 # Optional extras
 pip install -e ".[onnx]"   # ONNX Runtime GPU support
-pip install -e ".[aimet]"  # AIMET Torch QuantSim support
 pip install -e ".[dev]"    # pytest, mypy, ruff
 pip install -e ".[all]"    # everything
 ```
 
+### AIMET ONNX
+
+`aimet-onnx` is not on standard PyPI. Install it first via the Qualcomm GitHub releases, then install octopus:
+
+```bash
+pip install aimet-onnx --find-links https://github.com/quic/aimet/releases/download/<version>/
+pip install -e ".[aimet]"
+```
+
+Activate the monkey-patch by importing `octopus_aimet` once at the top of your script (see [AIMET ONNX Integration](#aimet-onnx-integration) below).
+
 ---
 
 ## Core Concept
-
-> **Visual guide:** See [Parallelism.md](./Parallelism.md) for ASCII diagrams of replica workers, Pipeline Parallel, and Tensor Parallel layouts.
 
 ```
 Before                              After
@@ -45,39 +50,8 @@ Octopus:
 4. **Spawns** Ray actors, each owning one model copy
 5. **Distributes** batches across workers and collects results
 
-By default Octopus auto-packs `N = floor((free_vram - safety_net) / model_vram)` workers per GPU. Set `workers_per_gpu=1` for isolation, or `max_workers=K` to cap total workers.
-
----
-
-## Automatic Strategy Selection
-
-By default, `sharding_strategy="auto"`. Octopus profiles VRAM and GPU resources, then picks the optimal execution strategy:
-
-```
-                   ┌─────────────────────────────┐
-                   │  Profile model VRAM (U)      │
-                   │  Discover GPUs               │
-                   └──────────┬──────────────────┘
-                              │
-                   ┌──────────▼──────────────────┐
-                   │  U + safety_net ≤ best GPU?  │
-                   └──────────┬──────────────────┘
-                         YES  │  NO
-                   ┌──────────▼──┐  ┌────────────▼───────────┐
-                   │  Replica    │  │  Shard across GPUs     │
-                   │  workers    │  │  PP preferred (safer)  │
-                   │  (auto-pack) │  │  TP for PyTorch if     │
-                   │             │  │  PP unavailable        │
-                   └─────────────┘  └────────────────────────┘
-```
-
-Override with explicit strategy when needed:
-
-```python
-Octopus(..., sharding_strategy="none")   # force replicas, error if too large
-Octopus(..., sharding_strategy="pp")     # force pipeline parallel
-Octopus(..., sharding_strategy="tp")     # force tensor parallel (PyTorch only)
-```
+Flow A: set `workers_per_gpu=1` for one model worker on each usable GPU.
+Flow B: omit `workers_per_gpu` to pack as many workers as VRAM allows, or set `max_workers=K`.
 
 ---
 
@@ -136,7 +110,7 @@ Octopus(
     model,                          # nn.Module | ort.InferenceSession | QuantSim
     eval_fn,                        # Callable(model, batch) -> result
     safety_net_gb   = 1.0,          # VRAM reserved per GPU (headroom)
-    sharding_strategy = "auto",     # "auto" | "tp" | "pp" | "none"
+    sharding_strategy = "none",     # "tp" | "pp" | "none"
     ordered         = True,         # preserve submission order in results
     gpu_ids         = None,         # restrict to specific GPU indices
     ray_address     = None,         # Ray cluster address (None = local)
@@ -214,7 +188,7 @@ Adapters handle serialization (`state_bytes()` / `from_state_bytes()`) so model 
 
 Support summary:
 
-| Backend | Replica workers (auto-pack) | Shared model across N GPUs |
+| Backend | Flow A / Flow B replica workers | Shared model across N GPUs |
 |---|---|---|
 | PyTorch | ✅ | ✅ with `sharding_strategy="pp"` and `sharding_strategy="tp"` |
 | ONNX Runtime | ✅ | ✅ with `sharding_strategy="pp"` |
@@ -296,6 +270,100 @@ from octopus import Octopus
 with Octopus(model=sim, eval_fn=eval_fn, safety_net_gb=1.5) as o:
     results = o.sensitivity_scan(layers=active_layers)
 ```
+
+---
+
+## AIMET ONNX Integration
+
+`octopus_aimet` is a zero-change integration layer for `aimet_onnx`. Importing it monkey-patches `aimet_onnx.QuantizationSimModel` so that `compute_encodings()` automatically distributes calibration across GPUs — no user code changes required.
+
+### Activation
+
+```python
+import octopus_aimet   # must be imported before any QuantizationSimModel is constructed
+```
+
+After this, all `QuantizationSimModel(...)` calls return an `OctopusQuantSimModel` that intercepts `compute_encodings()`.
+
+### Automatic Strategy Picker
+
+Mode is selected **lazily on the first `compute_encodings()` call**. No blocking I/O at construction time.
+
+| Mode | When selected | Behavior |
+|---|---|---|
+| `replicated` | Model fits on largest GPU (VRAM needed ≤ 90% of max free) | Spawn K workers (one per GPU), split calibration data K ways, merge per-tensor min/max encodings |
+| `sharded` | Model exceeds 90% of largest GPU free VRAM | Partition ONNX graph into N stages, calibrate stage-by-stage with activation buffering |
+| `passthrough` | No GPUs found, profiling failed, or histogram-based quant scheme | Delegate to original single-process AIMET `compute_encodings()` |
+
+Detection logic:
+```
+1. detect quant scheme → if histogram-based → passthrough immediately
+2. discover_gpus() → available VRAM per GPU
+3. profile_ort_vram() → model peak VRAM (subprocess + nvidia-smi delta × 1.25)
+4. vram_needed > max_free_gpu × 0.90 → sharded
+   else                               → replicated
+   on any failure                     → passthrough
+```
+
+### Calibration Scheme Support
+
+| Scheme | Mode | Notes |
+|---|---|---|
+| `post_training_tf` | `replicated` or `sharded` | Per-tensor min/max merge is exact |
+| `post_training_tf_enhanced` | `passthrough` | Histogram needs global statistics; splitting data would widen quantization range |
+| `post_training_percentile` | `passthrough` | Same reason |
+
+### Usage
+
+```python
+import octopus_aimet                         # activates monkey-patch
+from aimet_onnx.quantsim import QuantizationSimModel
+
+sim = QuantizationSimModel(model, ...)       # actually OctopusQuantSimModel
+
+# compute_encodings auto-selects replicated / sharded / passthrough
+sim.compute_encodings(my_callback, calibration_dataloader)
+
+# sensitivity_scan distributed across GPUs
+scores = sim.sensitivity_scan(eval_fn=eval_fn, layers=list(sim.qc_quantize_op_dict))
+```
+
+### Calibration Data Splitting
+
+The replicated path splits `callback_args` across K workers:
+
+| Type | Split |
+|---|---|
+| `list` | Round-robin: `[list[0::K], list[1::K], ...]` |
+| `torch.DataLoader` | `Subset` splits by index range, new `DataLoader` per shard |
+| Other iterables | Fallback to single worker (logs warning) |
+
+### Boundary Activation Buffer (sharded mode)
+
+Stage boundary tensors are captured in-memory. RAM estimate:
+`N_batches × batch_size × hidden_dim × dtype_bytes`
+
+For typical calibration (512 batches, hidden=768): ~few hundred MB — fine.
+For LLM-class models (hidden=8192, seq=2048): potentially tens of GB — reduce calibration batch count if RAM-constrained.
+
+### Sensitivity Scan
+
+```python
+scores = sim.sensitivity_scan(
+    eval_fn=eval_fn,    # Callable(ort.InferenceSession) -> float
+    layers=None,        # None = all quantized ops in qc_quantize_op_dict
+)
+# {"MatMul_0": 45.2, "Conv_1": 38.7, ...}
+```
+
+Routes through `Octopus.sensitivity_scan()` which spawns `SensitivityWorker` Ray actors and distributes the enabling loop across GPUs.
+
+### Compatibility Notes
+
+- Tested with `aimet-onnx >= 1.30`. Version guard warns on older installs.
+- `aimet_onnx >= 2.20`: import path is `aimet_onnx.common.defs.QuantScheme` (older: `aimet_common.defs`). Both handled automatically.
+- The patch is sensitive to: `qc_quantize_op_dict` attribute name, `sim.session` (ORT `InferenceSession`), `sim.export(path, filename_prefix, export_model)` signature, `load_encodings_to_sim` import path. If AIMET releases break these, update `_patch.py`.
+- Workers use cloudpickle to serialize the calibration callback. Lambdas and closures work. Callbacks referencing open file handles or CUDA tensors will fail at `ray.get()` time.
 
 ---
 
@@ -455,4 +523,13 @@ src/octopus/
         pipeline_parallel.py     — PyTorch PP runtime
         onnx_partition.py        — ONNX stage planning/materialization
         onnx_pipeline_runtime.py — staged ORT pipeline session runtime
+
+src/octopus_aimet/
+    __init__.py       — monkey-patch installer; version guard for aimet-onnx
+    _patch.py         — OctopusQuantSimModel; _detect_mode (sharded/replicated/passthrough);
+                        _is_histogram_scheme (passthrough for tf_enhanced, percentile)
+    _calibration.py   — parallel_compute_encodings (replicated); sharded_compute_encodings;
+                        _CalibrationWorker (Ray actor); _OutputCapturingSession (boundary buffering)
+    _merge_encodings.py — merge_encoding_dicts (per-tensor min/max across workers)
+    _sensitivity.py   — run_sensitivity_scan (thin wrapper over Octopus.sensitivity_scan)
 ```

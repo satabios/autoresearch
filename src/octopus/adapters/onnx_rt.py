@@ -90,7 +90,8 @@ class ONNXRuntimeAdapter:
             self._bundle_dir = None
 
     def forward(self, batch: Any) -> Any:
-        assert self._session is not None, "Session not loaded. Call load_to_device() first."
+        if self._session is None:
+            raise RuntimeError("Session not loaded. Call load_to_device() first.")
         return self._eval_fn(self._session, batch)
 
     def state_bytes(self) -> bytes:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import tempfile
 from typing import Any, Optional
 
@@ -9,6 +10,8 @@ import torch
 from octopus.adapters.onnx_rt import extract_model_bundle_to_tempdir
 from octopus.exceptions import ShardingError
 from octopus.sharding.onnx_partition import materialize_stage_models, plan_stages_from_onnx
+
+_log = logging.getLogger(__name__)
 
 
 class ORTPipelineSessionProxy:
@@ -69,8 +72,8 @@ class ORTPipelineSessionProxy:
         for d in self._temp_dirs:
             try:
                 d.cleanup()
-            except Exception:
-                pass
+            except OSError as e:
+                _log.debug("Temp dir cleanup failed: %s", e)
         self._temp_dirs.clear()
         self._stage_sessions.clear()
 

@@ -20,7 +20,7 @@ onnx = [
     "onnxruntime-gpu>=1.16",
 ]
 aimet = [
-    "aimet-torch>=1.30",
+    "aimet-onnx>=1.30",
 ]
 dev = [
     "pytest>=7.0",
@@ -31,9 +31,12 @@ dev = [
 all = [
     "octopus[onnx,aimet,dev]",
 ]
+aimet_patch = [
+    "octopus[aimet]",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/octopus"]
+packages = ["src/octopus", "src/octopus_aimet"]
 
 [tool.ruff]
 target-version = "py310"

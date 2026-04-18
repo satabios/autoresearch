@@ -392,7 +392,7 @@ class SensitivityWorker:
                     oom_pattern=pattern,
                 ) from e
             raise
-        sim = getattr(self._adapter, "sim", getattr(self._adapter, "_sim", None))
+        sim = getattr(self._adapter, "sim", None)
         self._op_name_to_quantizers = _build_op_name_to_quantizers(sim)
         self._quantsim = sim  # cached reference for the enabling loop
         self._initialized = True

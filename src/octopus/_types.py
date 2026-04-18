@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-ShardingMode = Literal["tp", "pp", "none", "auto"]
+ShardingMode = Literal["tp", "pp", "none"]
 
 
 @dataclass(frozen=True)
